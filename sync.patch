@@ -1,0 +1,2185 @@
+diff --git a/.github/workflows/ros1_ci.yml b/.github/workflows/ros1_ci.yml
+index be26c9f..616532c 100644
+--- a/.github/workflows/ros1_ci.yml
++++ b/.github/workflows/ros1_ci.yml
+@@ -22,7 +22,9 @@ jobs:
+ 
+     steps:
+     - uses: actions/checkout@v2
++      with:
++        path: src/laser_filters
+ 
+     - name: Build and run tests
+-      run: . /opt/ros/${{ matrix.rosdistro }}/setup.sh && ./ci.sh
++      run: . /opt/ros/${{ matrix.rosdistro }}/setup.sh && src/laser_filters/ci.sh
+ 
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 34da690..fcc1ada 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,8 +1,6 @@
+ cmake_minimum_required(VERSION 3.0.2)
+ project(laser_filters)
+ 
+-set(CMAKE_CXX_STANDARD 11)
+-
+ ##############################################################################
+ # Find dependencies
+ ##############################################################################
+@@ -26,6 +24,7 @@ generate_dynamic_reconfigure_options(
+   cfg/ScanShadowsFilter.cfg
+   cfg/SpeckleFilter.cfg
+   cfg/SectorFilter.cfg
++  cfg/BoxFilter.cfg
+ )
+ 
+ catkin_package(
+@@ -48,6 +47,8 @@ add_library(laser_scan_filters
+   src/array_filter.cpp
+   src/box_filter.cpp
+   src/polygon_filter.cpp
++  src/scan_shadow_detector.cpp
++  src/scan_shadows_filter.cpp
+   src/speckle_filter.cpp
+   src/intensity_filter.cpp
+   src/sector_filter.cpp
+@@ -57,13 +58,15 @@ target_link_libraries(laser_scan_filters ${catkin_LIBRARIES} ${Boost_LIBRARIES})
+ add_executable(scan_to_cloud_filter_chain src/scan_to_cloud_filter_chain.cpp)
+ target_link_libraries(scan_to_cloud_filter_chain ${catkin_LIBRARIES} ${Boost_LIBRARIES})
+ 
+-add_library(scan_to_cloud_filter_chain_nodelet src/scan_to_cloud_filter_chain.cpp)
+-target_link_libraries(scan_to_cloud_filter_chain_nodelet ${catkin_LIBRARIES} ${Boost_LIBRARIES})
+-target_compile_definitions(scan_to_cloud_filter_chain_nodelet PRIVATE BUILDING_NODELET=1)
+-
+ add_executable(scan_to_scan_filter_chain src/scan_to_scan_filter_chain.cpp)
+ target_link_libraries(scan_to_scan_filter_chain ${catkin_LIBRARIES} ${Boost_LIBRARIES})
+ 
++add_library(${PROJECT_NAME}_nodelets
++  src/scan_to_cloud_filter_chain.cpp
++  src/scan_to_scan_filter_chain.cpp)
++target_link_libraries(${PROJECT_NAME}_nodelets ${catkin_LIBRARIES} ${Boost_LIBRARIES})
++target_compile_definitions(${PROJECT_NAME}_nodelets PRIVATE BUILDING_NODELET=1)
++
+ add_executable(generic_laser_filter_node src/generic_laser_filter_node.cpp)
+ target_link_libraries(generic_laser_filter_node ${catkin_LIBRARIES} ${Boost_LIBRARIES})
+ 
+@@ -71,27 +74,27 @@ add_dependencies(laser_scan_filters ${PROJECT_NAME}_gencfg)
+ 
+ if (CATKIN_ENABLE_TESTING)
+   if (CATKIN_ENABLE_PERFORMANCE_TESTING)
+-    message("Enabling performance tests")
++    message(STATUS "Enabling performance tests")
+     add_definitions(-DENABLE_PERFORMANCE)
+   else()
+-    message("Disabled performance tests")
++    message(STATUS "Disabled performance tests")
+   endif()
+ 
+   find_package(rostest)
+ 
+-  add_executable(test_scan_filter_chain test/test_scan_filter_chain.cpp)
+-  target_link_libraries(test_scan_filter_chain laser_scan_filters ${rostest_LIBRARIES} ${GTEST_LIBRARIES})
+-  add_dependencies(test_scan_filter_chain gtest)
+-
+-  add_rostest(test/test_scan_filter_chain.launch)
++  add_rostest_gtest(test_scan_filter_chain test/test_scan_filter_chain.launch test/test_scan_filter_chain.cpp)
++  target_link_libraries(test_scan_filter_chain laser_scan_filters ${catkin_LIBRARIES})
+   add_rostest(test/test_polygon_filter.launch)
+   add_rostest(test/test_speckle_filter.launch)
+ 
+   catkin_add_gtest(test_shadow_detector test/test_shadow_detector.cpp)
+-  target_link_libraries(test_shadow_detector ${catkin_LIBRARIES} ${rostest_LIBRARIES})
++  target_link_libraries(test_shadow_detector laser_scan_filters ${catkin_LIBRARIES} ${rostest_LIBRARIES})
+ 
+   catkin_add_gtest(test_speckle_filter test/test_speckle_filter.cpp)
+   target_link_libraries(test_speckle_filter laser_scan_filters ${catkin_LIBRARIES} ${rostest_LIBRARIES})
++
++  catkin_add_gtest(test_scan_shadows_filter test/test_scan_shadows_filter.cpp)
++  target_link_libraries(test_scan_shadows_filter laser_scan_filters ${catkin_LIBRARIES} ${rostest_LIBRARIES})
+ endif()
+ 
+ ##############################################################################
+@@ -100,8 +103,8 @@ endif()
+ 
+ install(TARGETS pointcloud_filters laser_scan_filters 
+   scan_to_cloud_filter_chain
+-  scan_to_cloud_filter_chain_nodelet
+   scan_to_scan_filter_chain
++  ${PROJECT_NAME}_nodelets
+   generic_laser_filter_node
+   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+diff --git a/cfg/BoxFilter.cfg b/cfg/BoxFilter.cfg
+new file mode 100644
+index 0000000..530c46d
+--- /dev/null
++++ b/cfg/BoxFilter.cfg
+@@ -0,0 +1,24 @@
++from dynamic_reconfigure.parameter_generator_catkin import *
++
++PACKAGE = "laser_filters"
++
++gen = ParameterGenerator()
++
++gen.add("box_frame", str_t, 0,
++        "The frame in which the box is created (tf frame_id)", "base_link")
++gen.add("min_x", double_t, 0,
++        "Box starting point in x-axis", -1.0, -100.0, 100.0)
++gen.add("max_x", double_t, 0,
++        "Box ending point in x-axis", 1.0, -100.0, 100.0)
++gen.add("min_y", double_t, 0,
++        "Box starting point in y-axis", -1.0, -100.0, 100.0)
++gen.add("max_y", double_t, 0,
++        "Box ending point in y-axis", 1.0, -100.0, 100.0)
++gen.add("min_z", double_t, 0,
++        "Box starting point in z-axis", -1.0, -100.0, 100.0)
++gen.add("max_z", double_t, 0,
++        "Box ending point in z-axis", 1.0, -100.0, 100.0)
++gen.add("invert", bool_t, 0, "A Boolean to invert the filter", False)
++
++
++exit(gen.generate(PACKAGE, "laser_filters", "BoxFilter"))
+\ No newline at end of file
+diff --git a/ci.sh b/ci.sh
+index e736533..c22784d 100755
+--- a/ci.sh
++++ b/ci.sh
+@@ -1,22 +1,16 @@
+ #!/bin/bash
++#
++# Run this script from the root of your catkin workspace.
++#
+ 
+ # Exit with any error.
+ set -e
+ 
+-# Should be run from the root directory of the repo.
+-BUILD_DIR=build
+-
+-mkdir -p ${BUILD_DIR}
+-(cd ${BUILD_DIR} && cmake .. -DCATKIN_ENABLE_TESTING=1)
+-
+ # Build.
+-make -C ${BUILD_DIR}
+-
+-# Build the tests.
+-make -C ${BUILD_DIR} tests
++catkin_make -DCATKIN_ENABLE_TESTING=1
+ 
+-# Run the tests.
+-make -C ${BUILD_DIR} test
++# Run tests.
++catkin_make run_tests
+ 
+ # Summarize test results (also sets the exit status for the script)
+ catkin_test_results
+diff --git a/examples/angle_filter_example.launch b/examples/angle_filter_example.launch
+new file mode 100644
+index 0000000..39e7f15
+--- /dev/null
++++ b/examples/angle_filter_example.launch
+@@ -0,0 +1,6 @@
++<launch>
++<node pkg="laser_filters" type="scan_to_scan_filter_chain" output="screen" name="laser_filter">
++      <remap from="scan" to="base_scan" />
++      <rosparam command="load" file="$(find laser_filters)/examples/angle_filter_example.yaml" />
++</node>
++</launch>
+\ No newline at end of file
+diff --git a/examples/angle_filter_example.yaml b/examples/angle_filter_example.yaml
+new file mode 100644
+index 0000000..51e04e7
+--- /dev/null
++++ b/examples/angle_filter_example.yaml
+@@ -0,0 +1,6 @@
++scan_filter_chain:
++- name: angle
++  type: laser_filters/LaserScanAngularBoundsFilter
++  params:
++    lower_angle: -1.57
++    upper_angle: 1.57
+\ No newline at end of file
+diff --git a/examples/interpolation_filter_example.launch b/examples/interpolation_filter_example.launch
+new file mode 100644
+index 0000000..596150c
+--- /dev/null
++++ b/examples/interpolation_filter_example.launch
+@@ -0,0 +1,6 @@
++<launch>
++<node pkg="laser_filters" type="scan_to_scan_filter_chain" output="screen" name="laser_filter">
++      <remap from="scan" to="base_scan" />
++      <rosparam command="load" file="$(find laser_filters)/examples/interpolation_filter_example.yaml" />
++</node>
++</launch>
+\ No newline at end of file
+diff --git a/examples/interpolation_filter_example.yaml b/examples/interpolation_filter_example.yaml
+new file mode 100644
+index 0000000..51e04e7
+--- /dev/null
++++ b/examples/interpolation_filter_example.yaml
+@@ -0,0 +1,6 @@
++scan_filter_chain:
++- name: angle
++  type: laser_filters/LaserScanAngularBoundsFilter
++  params:
++    lower_angle: -1.57
++    upper_angle: 1.57
+\ No newline at end of file
+diff --git a/examples/scan_blob_filter_example.launch b/examples/scan_blob_filter_example.launch
+new file mode 100644
+index 0000000..ec831b3
+--- /dev/null
++++ b/examples/scan_blob_filter_example.launch
+@@ -0,0 +1,5 @@
++<launch>
++<node pkg="laser_filters" type="scan_to_scan_filter_chain" output="screen" name="laser_filter">
++      <rosparam command="load" file="$(find laser_filters)/examples/scan_blob_filter_example.yaml" />
++</node>
++</launch>
+diff --git a/examples/scan_blob_filter_example.yaml b/examples/scan_blob_filter_example.yaml
+new file mode 100644
+index 0000000..9a34944
+--- /dev/null
++++ b/examples/scan_blob_filter_example.yaml
+@@ -0,0 +1,6 @@
++scan_filter_chain:
++- name: scan_blob_filter
++  type: laser_filters/ScanBlobFilter
++  params:
++    max_radius: 0.25 # maximum radius to be considered as blob object
++    min_points: 6 # min scan points to be considered as blob object
+\ No newline at end of file
+diff --git a/examples/shadow_filter_example.yaml b/examples/shadow_filter_example.yaml
+index 5f73635..4629ec9 100644
+--- a/examples/shadow_filter_example.yaml
++++ b/examples/shadow_filter_example.yaml
+@@ -6,6 +6,7 @@ scan_filter_chain:
+     max_angle: 170
+     neighbors: 20
+     window: 1
++
+ - name: dark_shadows
+   type: laser_filters/LaserScanIntensityFilter
+   params: 
+diff --git a/include/laser_filters/box_filter.h b/include/laser_filters/box_filter.h
+index faf65cd..b8b7e99 100644
+--- a/include/laser_filters/box_filter.h
++++ b/include/laser_filters/box_filter.h
+@@ -56,6 +56,9 @@
+ #include <tf/transform_datatypes.h>
+ #include <tf/transform_listener.h>
+ 
++#include <dynamic_reconfigure/server.h>
++#include <laser_filters/BoxFilterConfig.h>
++
+ 
+ namespace laser_filters
+ {
+@@ -84,6 +87,11 @@ class LaserScanBoxFilter : public filters::FilterBase<sensor_msgs::LaserScan>
+     tf::Point min_, max_; 
+     bool invert_filter;
+     bool up_and_running_;
++
++    std::shared_ptr<dynamic_reconfigure::Server<BoxFilterConfig>> dyn_server_;
++    void reconfigureCB(BoxFilterConfig& config, uint32_t level);
++    boost::recursive_mutex own_mutex_;
++    BoxFilterConfig config_ = BoxFilterConfig::__getDefault__();
+ };
+ 
+ }
+diff --git a/include/laser_filters/polygon_filter.h b/include/laser_filters/polygon_filter.h
+index 5f05ea0..6c5fe48 100644
+--- a/include/laser_filters/polygon_filter.h
++++ b/include/laser_filters/polygon_filter.h
+@@ -61,32 +61,66 @@ namespace laser_filters
+ /**
+  * @brief This is a filter that removes points in a laser scan inside of a polygon.
+  */
+-class LaserScanPolygonFilter : public filters::FilterBase<sensor_msgs::LaserScan>
+-{
++class LaserScanPolygonFilterBase : public filters::FilterBase<sensor_msgs::LaserScan> {
+ public:
+-  LaserScanPolygonFilter();
+-  bool configure();
++  virtual bool configure();
++  virtual void configure(PolygonFilterConfig& config) { reconfigureCB(config, 0); }
+ 
+-  bool update(const sensor_msgs::LaserScan& input_scan, sensor_msgs::LaserScan& filtered_scan);
++  virtual bool update(const sensor_msgs::LaserScan& input_scan, sensor_msgs::LaserScan& filtered_scan) { return false; }
+ 
+-private:
+-  // configuration
++protected:
+   ros::Publisher polygon_pub_;
+-  std::shared_ptr<dynamic_reconfigure::Server<laser_filters::PolygonFilterConfig>> dyn_server_;
+-  void reconfigureCB(laser_filters::PolygonFilterConfig& config, uint32_t level);
+   boost::recursive_mutex own_mutex_;
++  // configuration
+   std::string polygon_frame_;
+   geometry_msgs::Polygon polygon_;
+   double polygon_padding_;
+   bool invert_filter_;
++  bool is_polygon_published_ = false;
++  std::shared_ptr<dynamic_reconfigure::Server<laser_filters::PolygonFilterConfig>> dyn_server_;
++
++  virtual void reconfigureCB(laser_filters::PolygonFilterConfig& config, uint32_t level);
+ 
+   // checks if points in polygon
+   bool inPolygon(tf::Point& point) const;
+ 
+-  laser_geometry::LaserProjection projector_;
++  void publishPolygon();
++};
+ 
++class LaserScanPolygonFilter : public LaserScanPolygonFilterBase {
++public:
++  bool update(const sensor_msgs::LaserScan& input_scan, sensor_msgs::LaserScan& filtered_scan) override;
++
++private:
++  // configuration
++  laser_geometry::LaserProjection projector_;
+   // tf listener to transform scans into the polygon_frame
+   tf::TransformListener tf_;
+ };
++
++/**
++ * @brief This is a filter that removes points in a laser scan inside of a polygon.
++ * It assumes that the transform between the scanner and the robot base remains unchanged,
++ * i.e. the position and orientation of the laser filter should not change.
++ * A typical use case for this filter is to filter out parts of the robot body or load that it may carry.
++ */
++class StaticLaserScanPolygonFilter : public LaserScanPolygonFilterBase {
++public:
++  bool configure() override;
++  bool update(const sensor_msgs::LaserScan& input_scan, sensor_msgs::LaserScan& filtered_scan) override;
++  
++protected:
++  void reconfigureCB(laser_filters::PolygonFilterConfig& config, uint32_t level) override;
++
++private:
++  double transform_timeout_;
++
++  Eigen::ArrayXXd co_sine_map_;
++  float co_sine_map_angle_min_;
++  float co_sine_map_angle_max_;
++  bool is_polygon_transformed_;
++
++  void checkCoSineMap(const sensor_msgs::LaserScan& input_scan);
++};
+ }
+ #endif /* polygon_filter.h */
+diff --git a/include/laser_filters/range_filter.h b/include/laser_filters/range_filter.h
+index f430693..19462a3 100644
+--- a/include/laser_filters/range_filter.h
++++ b/include/laser_filters/range_filter.h
+@@ -61,7 +61,7 @@ public:
+     ros::NodeHandle private_nh("~" + getName());
+     dyn_server_.reset(new dynamic_reconfigure::Server<RangeFilterConfig>(own_mutex_, private_nh));
+     dynamic_reconfigure::Server<RangeFilterConfig>::CallbackType f;
+-    f = boost::bind(&LaserScanRangeFilter::reconfigureCB, this, _1, _2);
++    f = [this](auto& config, auto level){ reconfigureCB(config, level); };
+     dyn_server_->setCallback(f);
+ 
+     getParam("lower_threshold", config_.lower_threshold);
+diff --git a/include/laser_filters/scan_shadow_detector.h b/include/laser_filters/scan_shadow_detector.h
+index c953832..5599180 100644
+--- a/include/laser_filters/scan_shadow_detector.h
++++ b/include/laser_filters/scan_shadow_detector.h
+@@ -39,6 +39,8 @@
+ #ifndef SCAN_SHADOW_DETECTOR_H
+ #define SCAN_SHADOW_DETECTOR_H
+ 
++#include <vector>
++
+ namespace laser_filters
+ {
+ class ScanShadowDetector
+@@ -46,35 +48,24 @@ class ScanShadowDetector
+ public:
+   float min_angle_tan_, max_angle_tan_;  // Filter angle thresholds
+ 
+-  void configure(const float min_angle, const float max_angle)
+-  {
+-    min_angle_tan_ = tanf(min_angle);
+-    max_angle_tan_ = tanf(max_angle);
++  void configure(const float min_angle, const float max_angle);
+ 
+-    // Correct sign of tan around singularity points
+-    if (min_angle_tan_ < 0.0)
+-      min_angle_tan_ = -min_angle_tan_;
+-    if (max_angle_tan_ > 0.0)
+-      max_angle_tan_ = -max_angle_tan_;
+-  }
+-  bool isShadow(const float r1, const float r2, const float included_angle)
+-  {
+-    const float perpendicular_y_ = r2 * sinf(included_angle);
+-    const float perpendicular_x_ = r1 - r2 * cosf(included_angle);
+-    const float perpendicular_tan_ = fabs(perpendicular_y_) / perpendicular_x_;
++  /** \brief Check if the point is a shadow of another point within one laser scan.
++   * \param r1 the distance to the first point
++   * \param r2 the distance to the second point
++   * \param included_angle the angle between laser scans for these two points
++   */
++  bool isShadow(const float r1, const float r2, const float included_angle);
+ 
+-    if (perpendicular_tan_ > 0)
+-    {
+-      if (perpendicular_tan_ < min_angle_tan_)
+-        return true;
+-    }
+-    else
+-    {
+-      if (perpendicular_tan_ > max_angle_tan_)
+-        return true;
+-    }
+-    return false;
+-  }
++  /** \brief Check if the point is a shadow of another point within one laser scan.
++   * Use this method instead of the version without the extra parameters to avoid
++   * computing sin and cos of the angle on every execution.
++   * \param r1 the distance to the first point
++   * \param r2 the distance to the second point
++   * \param included_angle_sin the sine of an angle between laser scans for these two points
++   * \param included_angle_cos the cosine of an angle between laser scans for these two points
++   */
++  bool isShadow(float r1, float r2, float included_angle_sin, float included_angle_cos);
+ };
+ }
+ 
+diff --git a/include/laser_filters/scan_shadows_filter.h b/include/laser_filters/scan_shadows_filter.h
+index 20a8b0f..e0509c9 100644
+--- a/include/laser_filters/scan_shadows_filter.h
++++ b/include/laser_filters/scan_shadows_filter.h
+@@ -1,5 +1,7 @@
+-/*
+- * Copyright (c) 2008 Radu Bogdan Rusu <rusu@cs.tum.edu>
++/**********************************************************************
++ * Software License Agreement (BSD License)
++ *
++ * Copyright (c) 2008 Radu Bogdan Rusu <rusu@cs.tum.edu> and other laser_filters authors
+  *
+  * All rights reserved.
+  *
+@@ -23,29 +25,21 @@
+  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  * POSSIBILITY OF SUCH DAMAGE.
+- *
+- * $Id: scan_shadows_filter.cpp,v 1.0 2008/12/04 12:00:00 rusu Exp $
+- *
+- */
++ *********************************************************************/
+ 
+ /*
+   \author Radu Bogdan Rusu <rusu@cs.tum.edu> Tully Foote <tfoote@willowgarage.com>
+-
+-
+ */
+ 
+ #ifndef LASER_SCAN_SHADOWS_FILTER_H
+ #define LASER_SCAN_SHADOWS_FILTER_H
+ 
+-#include <set>
++#include "laser_filters/scan_shadow_detector.h"
+ 
+ #include <filters/filter_base.hpp>
+-#include "laser_filters/scan_shadow_detector.h"
+ #include <sensor_msgs/LaserScan.h>
+-#include <angles/angles.h>
+ #include <laser_filters/ScanShadowsFilterConfig.h>
+ #include <dynamic_reconfigure/server.h>
+-#include <ros/ros.h>
+ 
+ namespace laser_filters
+ {
+@@ -66,97 +60,14 @@ public:
+   boost::recursive_mutex own_mutex_;
+   ScanShadowsFilterConfig param_config;
+ 
+-  ////////////////////////////////////////////////////////////////////////////////
+-  ScanShadowsFilter()
+-  {
+-  }
++  ScanShadowsFilter();
++  virtual ~ScanShadowsFilter();
+ 
+   /**@b Configure the filter from XML */
+-  bool configure()
+-  {
+-    ros::NodeHandle private_nh("~" + getName());
+-    dyn_server_.reset(new dynamic_reconfigure::Server<laser_filters::ScanShadowsFilterConfig>(own_mutex_, private_nh));
+-    dynamic_reconfigure::Server<laser_filters::ScanShadowsFilterConfig>::CallbackType f;
+-    f = boost::bind(&laser_filters::ScanShadowsFilter::reconfigureCB, this, _1, _2);
+-    dyn_server_->setCallback(f);
+-
+-    if (!filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("min_angle"), min_angle_))
+-    {
+-      ROS_ERROR("Error: ShadowsFilter was not given min_angle.\n");
+-      return false;
+-    }
+-    if (!filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("max_angle"), max_angle_))
+-    {
+-      ROS_ERROR("Error: ShadowsFilter was not given min_angle.\n");
+-      return false;
+-    }
+-    if (!filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("window"), window_))
+-    {
+-      ROS_ERROR("Error: ShadowsFilter was not given window.\n");
+-      return false;
+-    }
+-    neighbors_ = 0;  // default value
+-    if (!filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("neighbors"), neighbors_))
+-    {
+-      ROS_INFO("Error: ShadowsFilter was not given neighbors.\n");
+-    }
+-    remove_shadow_start_point_ = false;  // default value
+-    filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("remove_shadow_start_point"), remove_shadow_start_point_);
+-    ROS_INFO("Remove shadow start point: %s", remove_shadow_start_point_ ? "true" : "false");
++  bool configure();
+ 
+-    if (min_angle_ < 0)
+-    {
+-      ROS_ERROR("min_angle must be 0 <= min_angle. Forcing min_angle = 0.\n");
+-      min_angle_ = 0.0;
+-    }
+-    if (90 < min_angle_)
+-    {
+-      ROS_ERROR("min_angle must be min_angle <= 90. Forcing min_angle = 90.\n");
+-      min_angle_ = 90.0;
+-    }
+-    if (max_angle_ < 90)
+-    {
+-      ROS_ERROR("max_angle must be 90 <= max_angle. Forcing max_angle = 90.\n");
+-      max_angle_ = 90.0;
+-    }
+-    if (180 < min_angle_)
+-    {
+-      ROS_ERROR("max_angle must be max_angle <= 180. Forcing max_angle = 180.\n");
+-      max_angle_ = 180.0;
+-    }
++  void reconfigureCB(ScanShadowsFilterConfig& config, uint32_t level);
+ 
+-    shadow_detector_.configure(
+-        angles::from_degrees(min_angle_),
+-        angles::from_degrees(max_angle_));
+-
+-    param_config.min_angle = min_angle_;
+-    param_config.max_angle = max_angle_;
+-    param_config.window = window_;
+-    param_config.neighbors = neighbors_;
+-    param_config.remove_shadow_start_point = remove_shadow_start_point_;
+-    dyn_server_->updateConfig(param_config);
+-
+-    return true;
+-  }
+-
+-  void reconfigureCB(ScanShadowsFilterConfig& config, uint32_t level)
+-  {
+-    min_angle_ = config.min_angle;
+-    max_angle_ = config.max_angle;
+-    shadow_detector_.configure(
+-        angles::from_degrees(min_angle_),
+-        angles::from_degrees(max_angle_));
+-    neighbors_ = config.neighbors;
+-    window_ = config.window;
+-    remove_shadow_start_point_ = config.remove_shadow_start_point;
+-  }
+-
+-  ////////////////////////////////////////////////////////////////////////////////
+-  virtual ~ScanShadowsFilter()
+-  {
+-  }
+-
+-  ////////////////////////////////////////////////////////////////////////////////
+   /** \brief Filter shadow points based on 3 global parameters: min_angle, max_angle
+    * and window. {min,max}_angle specify the allowed angle interval (in degrees)
+    * between the created lines (see getAngleWithViewPoint). Window specifies how many
+@@ -164,53 +75,13 @@ public:
+    * \param scan_in the input LaserScan message
+    * \param scan_out the output LaserScan message
+    */
+-  bool update(const sensor_msgs::LaserScan& scan_in, sensor_msgs::LaserScan& scan_out)
+-  {
+-    boost::recursive_mutex::scoped_lock lock(own_mutex_);
+-
+-    // copy across all data first
+-    scan_out = scan_in;
+-
+-    std::set<int> indices_to_delete;
+-    // For each point in the current line scan
+-    for (unsigned int i = 0; i < scan_in.ranges.size(); i++)
+-    {
+-      for (int y = -window_; y < window_ + 1; y++)
+-      {
+-        int j = i + y;
+-        if (j < 0 || j >= (int)scan_in.ranges.size() || (int)i == j)
+-        {  // Out of scan bounds or itself
+-          continue;
+-        }
+-
+-        if (shadow_detector_.isShadow(
+-                scan_in.ranges[i], scan_in.ranges[j], y * scan_in.angle_increment))
+-        {
+-          for (int index = std::max<int>(i - neighbors_, 0); index <= std::min<int>(i + neighbors_, (int)scan_in.ranges.size() - 1); index++)
+-          {
+-            if (scan_in.ranges[i] < scan_in.ranges[index])
+-            {  // delete neighbor if they are farther away (note not self)
+-              indices_to_delete.insert(index);
+-            }
+-          }
+-          if (remove_shadow_start_point_)
+-          {
+-            indices_to_delete.insert(i);
+-          }
+-        }
+-      }
+-    }
+-
+-    ROS_DEBUG("ScanShadowsFilter removing %d Points from scan with min angle: %.2f, max angle: %.2f, neighbors: %d, and window: %d",
+-              (int)indices_to_delete.size(), min_angle_, max_angle_, neighbors_, window_);
+-    for (std::set<int>::iterator it = indices_to_delete.begin(); it != indices_to_delete.end(); ++it)
+-    {
+-      scan_out.ranges[*it] = std::numeric_limits<float>::quiet_NaN();  // Failed test to set the ranges to invalid value
+-    }
+-    return true;
+-  }
+-
+-  ////////////////////////////////////////////////////////////////////////////////
++  bool update(const sensor_msgs::LaserScan& scan_in, sensor_msgs::LaserScan& scan_out);
++private:
++  float angle_increment_;
++  std::vector<float> sin_map_;
++  std::vector<float> cos_map_;
++  
++  void prepareForInput(const float angle_increment);
+ };
+ }
+ 
+diff --git a/include/laser_filters/speckle_filter.h b/include/laser_filters/speckle_filter.h
+index 4047c4f..2b6b67f 100644
+--- a/include/laser_filters/speckle_filter.h
++++ b/include/laser_filters/speckle_filter.h
+@@ -51,6 +51,7 @@ namespace laser_filters
+ class WindowValidator
+ {
+ public:
++  virtual ~WindowValidator() = default;
+   virtual bool checkWindowValid(const sensor_msgs::LaserScan& scan, size_t idx, size_t window, double max_range_difference) = 0;
+ };
+ 
+@@ -63,18 +64,16 @@ class DistanceWindowValidator : public WindowValidator
+       return false;
+     }
+ 
+-    for (size_t neighbor_idx_nr = 1; neighbor_idx_nr < window; ++neighbor_idx_nr)
+-    {
+-      size_t neighbor_idx = idx + neighbor_idx_nr;
+-      if (neighbor_idx < scan.ranges.size())  // Out of bound check
+-      {
+-        const float& neighbor_range = scan.ranges[neighbor_idx];
+-        if (neighbor_range != neighbor_range || fabs(neighbor_range - range) > max_range_difference)
+-        {
+-          return false;
+-        }
++    size_t i = idx + 1;
++    size_t i_max = std::min(idx + window, scan.ranges.size());
++    while (i < i_max) {
++      const float& neighbor_range = scan.ranges[i];
++      if (neighbor_range != neighbor_range || fabs(neighbor_range - range) > max_range_difference) {
++        return false;
+       }
++      ++i;
+     }
++
+     return true;
+   }
+ };
+@@ -170,6 +169,9 @@ private:
+ 
+   SpeckleFilterConfig config_ = SpeckleFilterConfig::__getDefault__();
+   WindowValidator* validator_;
++
++  // Work area. Vector re-used by update() to avoid repeated dynamic memory allocations
++  std::vector<bool> valid_ranges_work_;
+ };
+ }
+ #endif /* speckle_filter.h */
+diff --git a/laser_filters_plugins.xml b/laser_filters_plugins.xml
+index ab72613..f83de9e 100644
+--- a/laser_filters_plugins.xml
++++ b/laser_filters_plugins.xml
+@@ -59,6 +59,12 @@
+       <description>
+ 	This is a filter that removes points in a laser scan inside of a polygon.
+       </description>
++    </class>
++      <class name="laser_filters/StaticLaserScanPolygonFilter" type="laser_filters::StaticLaserScanPolygonFilter"
++	    base_class_type="filters::FilterBase<sensor_msgs::LaserScan>">
++      <description>
++	This is a filter that removes points in a laser scan inside of a polygon static relative to robot base.
++      </description>
+     </class>
+     <class name="laser_filters/LaserScanSpeckleFilter" type="laser_filters::LaserScanSpeckleFilter"
+ 	    base_class_type="filters::FilterBase<sensor_msgs::LaserScan>">
+diff --git a/nodelets.xml b/nodelets.xml
+index 6d554f2..2c44d89 100644
+--- a/nodelets.xml
++++ b/nodelets.xml
+@@ -1,7 +1,12 @@
+-<library path="lib/libscan_to_cloud_filter_chain_nodelet">
++<library path="lib/liblaser_filters_nodelets">
+   <class name="laser_filters/scan_to_cloud_filter_chain" type="ScanToCloudFilterChainNodelet" base_class_type="nodelet::Nodelet">
+     <description>
+       Convert laser scans to pointclouds allowing to filter both as a scan and as a point cloud.
+     </description>
+   </class>
++  <class name="laser_filters/scan_to_scan_filter_chain" type="ScanToScanFilterChainNodelet" base_class_type="nodelet::Nodelet">
++    <description>
++      Laser scan filter pipeline
++    </description>
++  </class>
+ </library>
+diff --git a/src/box_filter.cpp b/src/box_filter.cpp
+index bf6bb53..9dc2f48 100644
+--- a/src/box_filter.cpp
++++ b/src/box_filter.cpp
+@@ -49,57 +49,32 @@ laser_filters::LaserScanBoxFilter::LaserScanBoxFilter(){
+ 
+ }
+ 
++
+ bool laser_filters::LaserScanBoxFilter::configure(){
++  ros::NodeHandle private_nh("~" + getName());
++  dyn_server_.reset(new dynamic_reconfigure::Server<BoxFilterConfig>(own_mutex_, private_nh));
++  dynamic_reconfigure::Server<BoxFilterConfig>::CallbackType f;
++  f = [this](auto& config, auto level){ reconfigureCB(config, level); };
++  dyn_server_->setCallback(f);
++
+   up_and_running_ = true;
+-  double min_x = 0, min_y = 0, min_z = 0, max_x = 0, max_y = 0, max_z = 0;
+-  bool box_frame_set = getParam("box_frame", box_frame_);
+-  bool x_max_set = getParam("max_x", max_x);
+-  bool y_max_set = getParam("max_y", max_y);
+-  bool z_max_set = getParam("max_z", max_z);
+-  bool x_min_set = getParam("min_x", min_x);
+-  bool y_min_set = getParam("min_y", min_y);
+-  bool z_min_set = getParam("min_z", min_z);
+-  bool invert_set = getParam("invert", invert_filter);
+-  
+-  ROS_INFO("BOX filter started");
+ 
+-  max_.setX(max_x);
+-  max_.setY(max_y);
+-  max_.setZ(max_z);
+-  min_.setX(min_x);
+-  min_.setY(min_y);
+-  min_.setZ(min_z);
++  getParam("box_frame", config_.box_frame);
++  getParam("max_x", config_.max_x);
++  getParam("max_y", config_.max_y);
++  getParam("max_z", config_.max_z);
++  getParam("min_x", config_.min_x);
++  getParam("min_y", config_.min_y);
++  getParam("min_z", config_.min_z);
++  getParam("invert", config_.invert);
++  dyn_server_->updateConfig(config_);
+   
+-  if(!box_frame_set){
+-    ROS_ERROR("box_frame is not set!");
+-  }
+-  if(!x_max_set){
+-    ROS_ERROR("max_x is not set!");
+-  }
+-  if(!y_max_set){
+-    ROS_ERROR("max_y is not set!");
+-  }
+-  if(!z_max_set){
+-    ROS_ERROR("max_z is not set!");
+-  }
+-  if(!x_min_set){
+-    ROS_ERROR("min_x is not set!");
+-  }
+-  if(!y_min_set){
+-    ROS_ERROR("min_y is not set!");
+-  }
+-  if(!z_min_set){
+-    ROS_ERROR("min_z is not set!");
+-  }
+-  if(!invert_set){
+-    ROS_INFO("invert filter not set, assuming false");
+-    invert_filter=false;
+-  }
+-
+-
+-  return box_frame_set && x_max_set && y_max_set && z_max_set &&
+-    x_min_set && y_min_set && z_min_set;
+-
++  ROS_INFO("BOX filter started");
++  ROS_INFO("Box frame is: %s", config_.box_frame.c_str());
++  ROS_INFO("Box: x_min %f, x_max, %f, y_min, %f, y_max, %f, min_z %f, max_z %f", config_.min_x,
++   config_.max_x, config_.min_y, config_.max_y, config_.min_z, config_.max_z);
++  ROS_INFO("Box filter invert: %d", config_.invert);
++  return true;
+ }
+ 
+ bool laser_filters::LaserScanBoxFilter::update(
+@@ -112,7 +87,7 @@ bool laser_filters::LaserScanBoxFilter::update(
+   std::string error_msg;
+ 
+   bool success = tf_.waitForTransform(
+-    box_frame_,
++    config_.box_frame,
+     input_scan.header.frame_id,
+     input_scan.header.stamp + ros::Duration().fromSec(input_scan.ranges.size()*input_scan.time_increment),
+     ros::Duration(1.0),
+@@ -125,7 +100,7 @@ bool laser_filters::LaserScanBoxFilter::update(
+   }
+ 
+   try{
+-    projector_.transformLaserScanToPointCloud(box_frame_, input_scan, laser_cloud, tf_);
++    projector_.transformLaserScanToPointCloud(config_.box_frame, input_scan, laser_cloud, tf_);
+   }
+   catch(tf::TransformException& ex){
+     if(up_and_running_){
+@@ -182,7 +157,7 @@ bool laser_filters::LaserScanBoxFilter::update(
+ 
+     tf::Point point(x, y, z);
+ 
+-    if(!invert_filter){
++    if(!config_.invert){
+       if(inBox(point)){
+         output_scan.ranges[index] = std::numeric_limits<float>::quiet_NaN();
+       }
+@@ -200,8 +175,13 @@ bool laser_filters::LaserScanBoxFilter::update(
+ 
+ bool laser_filters::LaserScanBoxFilter::inBox(tf::Point &point){
+   return
+-    point.x() < max_.x() && point.x() > min_.x() && 
+-    point.y() < max_.y() && point.y() > min_.y() &&
+-    point.z() < max_.z() && point.z() > min_.z();
++    point.x() < config_.max_x && point.x() > config_.min_x &&
++    point.y() < config_.max_y && point.y() > config_.min_y &&
++    point.z() < config_.max_z && point.z() > config_.min_z;
++}
++
++void laser_filters::LaserScanBoxFilter::reconfigureCB(BoxFilterConfig& config, uint32_t level)
++{
++  config_ = config;
+ }
+ 
+diff --git a/src/generic_laser_filter_node.cpp b/src/generic_laser_filter_node.cpp
+index 4e31d92..b96403f 100644
+--- a/src/generic_laser_filter_node.cpp
++++ b/src/generic_laser_filter_node.cpp
+@@ -66,13 +66,13 @@ public:
+     filter_chain_.configure("");
+     
+     // Setup tf::MessageFilter for input
+-    tf_filter_.registerCallback(boost::bind(&GenericLaserScanFilterNode::callback, this, _1));
++    tf_filter_.registerCallback(boost::bind(&GenericLaserScanFilterNode::callback, this, boost::placeholders::_1));
+     tf_filter_.setTolerance(ros::Duration(0.03));
+     
+     // Advertise output
+     output_pub_ = nh_.advertise<sensor_msgs::LaserScan>("output", 1000);
+ 
+-    deprecation_timer_ = nh_.createTimer(ros::Duration(5.0), boost::bind(&GenericLaserScanFilterNode::deprecation_warn, this, _1));
++    deprecation_timer_ = nh_.createTimer(ros::Duration(5.0), [this](auto& event){ deprecation_warn(event); });
+   }
+   
+   void deprecation_warn(const ros::TimerEvent& e)
+diff --git a/src/intensity_filter.cpp b/src/intensity_filter.cpp
+index b35f1fe..492023d 100644
+--- a/src/intensity_filter.cpp
++++ b/src/intensity_filter.cpp
+@@ -50,7 +50,7 @@ bool LaserScanIntensityFilter::configure()
+   ros::NodeHandle private_nh("~" + getName());
+   dyn_server_.reset(new dynamic_reconfigure::Server<IntensityFilterConfig>(own_mutex_, private_nh));
+   dynamic_reconfigure::Server<IntensityFilterConfig>::CallbackType f;
+-  f = boost::bind(&LaserScanIntensityFilter::reconfigureCB, this, _1, _2);
++  f = [this](auto& config, auto level){ reconfigureCB(config, level); };
+   dyn_server_->setCallback(f);
+ 
+   getParam("lower_threshold", config_.lower_threshold);
+diff --git a/src/laser_scan_filters.cpp b/src/laser_scan_filters.cpp
+index a704fa7..0f872ff 100644
+--- a/src/laser_scan_filters.cpp
++++ b/src/laser_scan_filters.cpp
+@@ -45,7 +45,7 @@
+ #include "sensor_msgs/LaserScan.h"
+ #include <filters/filter_base.hpp>
+ 
+-#include "pluginlib/class_list_macros.h"
++#include "pluginlib/class_list_macros.hpp"
+ 
+ 
+ PLUGINLIB_EXPORT_CLASS(laser_filters::LaserMedianFilter, filters::FilterBase<sensor_msgs::LaserScan>)
+@@ -59,6 +59,7 @@ PLUGINLIB_EXPORT_CLASS(laser_filters::ScanShadowsFilter, filters::FilterBase<sen
+ PLUGINLIB_EXPORT_CLASS(laser_filters::InterpolationFilter, filters::FilterBase<sensor_msgs::LaserScan>)
+ PLUGINLIB_EXPORT_CLASS(laser_filters::LaserScanBoxFilter, filters::FilterBase<sensor_msgs::LaserScan>)
+ PLUGINLIB_EXPORT_CLASS(laser_filters::LaserScanPolygonFilter, filters::FilterBase<sensor_msgs::LaserScan>)
++PLUGINLIB_EXPORT_CLASS(laser_filters::StaticLaserScanPolygonFilter, filters::FilterBase<sensor_msgs::LaserScan>)
+ PLUGINLIB_EXPORT_CLASS(laser_filters::LaserScanSpeckleFilter, filters::FilterBase<sensor_msgs::LaserScan>)
+ PLUGINLIB_EXPORT_CLASS(laser_filters::LaserScanMaskFilter, filters::FilterBase<sensor_msgs::LaserScan>)
+ PLUGINLIB_EXPORT_CLASS(laser_filters::ScanBlobFilter, filters::FilterBase<sensor_msgs::LaserScan>)
+diff --git a/src/pointcloud_filters.cpp b/src/pointcloud_filters.cpp
+index 7c4d5b2..472f355 100644
+--- a/src/pointcloud_filters.cpp
++++ b/src/pointcloud_filters.cpp
+@@ -29,6 +29,6 @@
+ 
+ #include "sensor_msgs/PointCloud.h"
+ #include "laser_filters/point_cloud_footprint_filter.h"
+-#include "pluginlib/class_list_macros.h"
++#include "pluginlib/class_list_macros.hpp"
+ 
+ PLUGINLIB_EXPORT_CLASS(laser_filters::PointCloudFootprintFilter, filters::FilterBase<sensor_msgs::PointCloud>)
+diff --git a/src/polygon_filter.cpp b/src/polygon_filter.cpp
+index 125ea8f..a95cb55 100644
+--- a/src/polygon_filter.cpp
++++ b/src/polygon_filter.cpp
+@@ -247,11 +247,8 @@ std::string polygonToString(geometry_msgs::Polygon polygon)
+ }
+ 
+ namespace laser_filters{
+-LaserScanPolygonFilter::LaserScanPolygonFilter()
+-{
+-}
+ 
+-bool LaserScanPolygonFilter::configure()
++bool LaserScanPolygonFilterBase::configure()
+ {
+   XmlRpc::XmlRpcValue polygon_xmlrpc;
+   std::string polygon_string;
+@@ -260,7 +257,7 @@ bool LaserScanPolygonFilter::configure()
+   ros::NodeHandle private_nh("~" + getName());
+   dyn_server_.reset(new dynamic_reconfigure::Server<laser_filters::PolygonFilterConfig>(own_mutex_, private_nh));
+   dynamic_reconfigure::Server<laser_filters::PolygonFilterConfig>::CallbackType f;
+-  f = boost::bind(&laser_filters::LaserScanPolygonFilter::reconfigureCB, this, _1, _2);
++  f = [this](auto& config, auto level){ reconfigureCB(config, level); };
+   dyn_server_->setCallback(f);
+ 
+   bool polygon_set = getParam("polygon", polygon_xmlrpc);
+@@ -277,7 +274,8 @@ bool LaserScanPolygonFilter::configure()
+   param_config.invert = invert_filter_;
+   dyn_server_->updateConfig(param_config);
+ 
+-  polygon_pub_ = private_nh.advertise<geometry_msgs::PolygonStamped>("polygon", 1);
++  polygon_pub_ = private_nh.advertise<geometry_msgs::PolygonStamped>("polygon", 1, true);
++  is_polygon_published_ = false;
+ 
+   if (!polygon_frame_set)
+   {
+@@ -296,16 +294,49 @@ bool LaserScanPolygonFilter::configure()
+   return polygon_frame_set && polygon_set;
+ }
+ 
++// See https://web.cs.ucdavis.edu/~okreylos/TAship/Spring2000/PointInPolygon.html
++bool LaserScanPolygonFilterBase::inPolygon(tf::Point& point) const {
++  int i, j;
++  bool c = false;
++
++  for (i = 0, j = polygon_.points.size() - 1; i < polygon_.points.size(); j = i++)
++  {
++    if ((polygon_.points.at(i).y > point.y() != (polygon_.points.at(j).y > point.y()) &&
++         (point.x() < (polygon_.points[j].x - polygon_.points[i].x) * (point.y() - polygon_.points[i].y) /
++                              (polygon_.points[j].y - polygon_.points[i].y) +
++                          polygon_.points[i].x)))
++      c = !c;
++  }
++  return c;
++}
++
++void LaserScanPolygonFilterBase::publishPolygon()
++{
++  if (!is_polygon_published_)
++  {
++    geometry_msgs::PolygonStamped polygon_stamped;
++    polygon_stamped.header.frame_id = polygon_frame_;
++    polygon_stamped.header.stamp = ros::Time::now();
++    polygon_stamped.polygon = polygon_;
++    polygon_pub_.publish(polygon_stamped);
++    is_polygon_published_ = true;
++  }
++}
++
++void LaserScanPolygonFilterBase::reconfigureCB(laser_filters::PolygonFilterConfig& config, uint32_t level)
++{
++  invert_filter_ = config.invert;
++  polygon_ = makePolygonFromString(config.polygon, polygon_);
++  padPolygon(polygon_, config.polygon_padding);
++  is_polygon_published_ = false;
++}
++
+ bool LaserScanPolygonFilter::update(const sensor_msgs::LaserScan& input_scan,
+-                                                   sensor_msgs::LaserScan& output_scan)
++                                    sensor_msgs::LaserScan& output_scan)
+ {
+   boost::recursive_mutex::scoped_lock lock(own_mutex_);
+ 
+-  geometry_msgs::PolygonStamped polygon_stamped;
+-  polygon_stamped.header.frame_id = polygon_frame_;
+-  polygon_stamped.header.stamp = ros::Time::now();
+-  polygon_stamped.polygon = polygon_;
+-  polygon_pub_.publish(polygon_stamped);
++  publishPolygon();
+ 
+   output_scan = input_scan;
+ 
+@@ -386,28 +417,133 @@ bool LaserScanPolygonFilter::update(const sensor_msgs::LaserScan& input_scan,
+   return true;
+ }
+ 
++bool StaticLaserScanPolygonFilter::configure()
++{
++  is_polygon_transformed_ = false;
++
++  transform_timeout_ = 5; // Default
++  getParam("transform_timeout", transform_timeout_);
+ 
+-bool LaserScanPolygonFilter::inPolygon(tf::Point& point) const
++  return LaserScanPolygonFilterBase::configure();
++}
++
++void StaticLaserScanPolygonFilter::checkCoSineMap(const sensor_msgs::LaserScan& scan_in)
+ {
+-  int i, j;
+-  bool c = false;
++  size_t n_pts = scan_in.ranges.size();
++
++  if (
++    co_sine_map_.rows() != (int)n_pts ||
++    co_sine_map_angle_min_ != scan_in.angle_min ||
++    co_sine_map_angle_max_ != scan_in.angle_max
++  ) {
++    ROS_DEBUG_NAMED("StaticLaserScanPolygonFilter", "No precomputed map given. Computing one.");
++    co_sine_map_ = Eigen::ArrayXXd(n_pts, 2);
++    co_sine_map_angle_min_ = scan_in.angle_min;
++    co_sine_map_angle_max_ = scan_in.angle_max;
++
++    // Spherical->Cartesian projection
++    for (size_t i = 0; i < n_pts; ++i)
++    {
++      co_sine_map_(i, 0) = cos(scan_in.angle_min + (double) i * scan_in.angle_increment);
++      co_sine_map_(i, 1) = sin(scan_in.angle_min + (double) i * scan_in.angle_increment);
++    }
++  }
++}
+ 
+-  for (i = 0, j = polygon_.points.size() - 1; i < polygon_.points.size(); j = i++)
++// Note: This implementation transforms the polygon relative to the laser.
++// It does this lazily and only once. This has the advantage that the check if points fall inside the polygon is fast
++// as the transform is not needed there. Furthermore, it means that the filter chain node
++// does not need to be continuously subscribed to the transform topic, which significantly reduces CPU load.
++// A pre-requisite for this to work is that the transform is static, i.e. the position and orientation of the laser with regard to
++// the base of the robot does not change.
++bool StaticLaserScanPolygonFilter::update(const sensor_msgs::LaserScan& input_scan,
++                                          sensor_msgs::LaserScan& output_scan)
++{
++  boost::recursive_mutex::scoped_lock lock(own_mutex_);
++
++  publishPolygon();
++
++  if (!is_polygon_transformed_) {
++    tf::TransformListener transform_listener;
++
++    std::string error_msg;
++    ROS_DEBUG_NAMED(
++      "StaticLaserScanPolygonFilter", "waitForTransform %s -> %s",
++      polygon_frame_.c_str(), input_scan.header.frame_id.c_str()
++    );
++    bool success = transform_listener.waitForTransform(
++      input_scan.header.frame_id, polygon_frame_,
++      ros::Time(),       // No restrictions on transform time. It is static.
++      ros::Duration(transform_timeout_),
++      ros::Duration(0),  // This setting has no effect
++      &error_msg
++    );
++
++    if (!success)
++    {
++      ROS_WARN_THROTTLE_NAMED(
++          1, "StaticLaserScanPolygonFilter",
++          "Could not get transform, ignoring laser scan! %s", error_msg.c_str()
++      );
++      return false;
++    }
++    else
++    {
++      ROS_INFO_NAMED("StaticLaserScanPolygonFilter", "Obtained transform");
++    }
++
++    try {
++      // Transform each point of polygon. This includes multiple type convertions because of transformPoint API requiring Stamped<Point>
++      // which does not in turn expose coordinate values
++      for (int i = 0; i < polygon_.points.size(); ++i)
++      {
++        tf::Point point(polygon_.points[i].x, polygon_.points[i].y, 0);
++        tf::Stamped<tf::Point> point_stamped(point, ros::Time(), polygon_frame_);
++        tf::Stamped<tf::Point> point_stamped_new;
++        transform_listener.transformPoint(input_scan.header.frame_id, point_stamped, point_stamped_new);
++        geometry_msgs::PointStamped result_point;
++        tf::pointStampedTFToMsg(point_stamped_new, result_point);
++        polygon_.points[i].x = result_point.point.x;
++        polygon_.points[i].y = result_point.point.y;
++      }
++
++      is_polygon_transformed_ = true;
++    }
++    catch (tf::TransformException& ex)
++    {
++      ROS_WARN_THROTTLE_NAMED(1, "StaticLaserScanPolygonFilter", "Exception while transforming polygon");
++      return false;
++    }
++  }
++
++  output_scan = input_scan;
++  checkCoSineMap(input_scan);
++
++  size_t i = 0;
++  size_t i_max = input_scan.ranges.size();
++
++  while (i < i_max)
+   {
+-    if ((polygon_.points.at(i).y > point.y() != (polygon_.points.at(j).y > point.y()) &&
+-         (point.x() < (polygon_.points[j].x - polygon_.points[i].x) * (point.y() - polygon_.points[i].y) /
+-                              (polygon_.points[j].y - polygon_.points[i].y) +
+-                          polygon_.points[i].x)))
+-      c = !c;
++    float range = input_scan.ranges[i];
++
++    float x = co_sine_map_(i, 0) * range;
++    float y = co_sine_map_(i, 1) * range;
++    tf::Point point(x, y, 0);
++
++    if (invert_filter_ != inPolygon(point))
++    {
++      output_scan.ranges[i] = std::numeric_limits<float>::quiet_NaN();
++    }
++
++    ++i;
+   }
+-  return c;
+-}
+ 
++  return true;
++}
+ 
+-void LaserScanPolygonFilter::reconfigureCB(laser_filters::PolygonFilterConfig& config, uint32_t level)
++void StaticLaserScanPolygonFilter::reconfigureCB(laser_filters::PolygonFilterConfig& config, uint32_t level)
+ {
+-  invert_filter_ = config.invert;
+-  polygon_ = makePolygonFromString(config.polygon, polygon_);
+-  padPolygon(polygon_, config.polygon_padding);
++  is_polygon_transformed_ = false;
++  LaserScanPolygonFilterBase::reconfigureCB(config, level);
+ }
+ }
+diff --git a/src/scan_shadow_detector.cpp b/src/scan_shadow_detector.cpp
+new file mode 100644
+index 0000000..87c2c03
+--- /dev/null
++++ b/src/scan_shadow_detector.cpp
+@@ -0,0 +1,81 @@
++/*********************************************************************
++* Software License Agreement (BSD License)
++* 
++*  Copyright (c) 2017-2021, laser_filters authors
++*  All rights reserved.
++* 
++*  Redistribution and use in source and binary forms, with or without
++*  modification, are permitted provided that the following conditions
++*  are met:
++* 
++*   * Redistributions of source code must retain the above copyright
++*     notice, this list of conditions and the following disclaimer.
++*   * Redistributions in binary form must reproduce the above
++*     copyright notice, this list of conditions and the following
++*     disclaimer in the documentation and/or other materials provided
++*     with the distribution.
++*   * Neither the name of the Willow Garage nor the names of its
++*     contributors may be used to endorse or promote products derived
++*     from this software without specific prior written permission.
++* 
++*  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++*  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++*  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++*  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++*  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++*  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++*  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++*  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
++*  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++*  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
++*  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++*  POSSIBILITY OF SUCH DAMAGE.
++*********************************************************************/
++
++/*
++\author Atsushi Watanabe (SEQSENSE, Inc.)
++*/
++
++#include <laser_filters/scan_shadow_detector.h>
++#include <math.h>
++#include <ros/ros.h>
++
++namespace laser_filters
++{
++  void ScanShadowDetector::configure(const float min_angle, const float max_angle)
++  {
++    min_angle_tan_ = tanf(min_angle);
++    max_angle_tan_ = tanf(max_angle);
++
++    // Correct sign of tan around singularity points
++    if (min_angle_tan_ < 0.0)
++      min_angle_tan_ = -min_angle_tan_;
++    if (max_angle_tan_ > 0.0)
++      max_angle_tan_ = -max_angle_tan_;
++  }
++
++  bool ScanShadowDetector::isShadow(const float r1, const float r2, const float included_angle)
++  {
++    float included_angle_sin = sinf(included_angle);
++    float included_angle_cos = cosf(included_angle);
++    return isShadow(r1, r2, included_angle_sin, included_angle_cos);
++  }
++
++  bool ScanShadowDetector::isShadow(float r1, float r2, float included_angle_sin, float included_angle_cos)
++  {
++    const float perpendicular_y_ = r2 * included_angle_sin;
++    const float perpendicular_x_ = r1 - r2 * included_angle_cos;
++    const float perpendicular_tan_ = fabs(perpendicular_y_) / perpendicular_x_;
++
++    if (perpendicular_tan_ > 0) {
++      if (perpendicular_tan_ < min_angle_tan_)
++        return true;
++    }
++    else {
++      if (perpendicular_tan_ > max_angle_tan_)
++        return true;
++    }
++
++    return false;
++  }
++}
+diff --git a/src/scan_shadows_filter.cpp b/src/scan_shadows_filter.cpp
+new file mode 100644
+index 0000000..221a8f2
+--- /dev/null
++++ b/src/scan_shadows_filter.cpp
+@@ -0,0 +1,189 @@
++/**********************************************************************
++ * Software License Agreement (BSD License)
++ *
++ * Copyright (c) 2008-2021 Radu Bogdan Rusu <rusu@cs.tum.edu> and other laser_filters authors
++ *
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ *     * Redistributions of source code must retain the above copyright
++ *       notice, this list of conditions and the following disclaimer.
++ *     * Redistributions in binary form must reproduce the above copyright
++ *       notice, this list of conditions and the following disclaimer in the
++ *       documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ *********************************************************************/
++
++#include <laser_filters/scan_shadows_filter.h>
++
++#include <ros/node_handle.h>
++#include <angles/angles.h>
++
++namespace laser_filters
++{
++
++ScanShadowsFilter::ScanShadowsFilter()
++{
++}
++
++ScanShadowsFilter::~ScanShadowsFilter()
++{
++}
++    
++bool ScanShadowsFilter::configure()
++{
++    ros::NodeHandle private_nh("~" + getName());
++    dyn_server_.reset(new dynamic_reconfigure::Server<laser_filters::ScanShadowsFilterConfig>(own_mutex_, private_nh));
++    dynamic_reconfigure::Server<laser_filters::ScanShadowsFilterConfig>::CallbackType f;
++    f = [this](auto& config, auto level){ reconfigureCB(config, level); };
++    dyn_server_->setCallback(f);
++
++    if (!filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("min_angle"), min_angle_))
++    {
++      ROS_ERROR("Error: ShadowsFilter was not given min_angle.\n");
++      return false;
++    }
++    if (!filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("max_angle"), max_angle_))
++    {
++      ROS_ERROR("Error: ShadowsFilter was not given min_angle.\n");
++      return false;
++    }
++    if (!filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("window"), window_))
++    {
++      ROS_ERROR("Error: ShadowsFilter was not given window.\n");
++      return false;
++    }
++    neighbors_ = 0;  // default value
++    if (!filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("neighbors"), neighbors_))
++    {
++      ROS_INFO("Error: ShadowsFilter was not given neighbors.\n");
++    }
++    remove_shadow_start_point_ = false;  // default value
++    filters::FilterBase<sensor_msgs::LaserScan>::getParam(std::string("remove_shadow_start_point"), remove_shadow_start_point_);
++    ROS_INFO("Remove shadow start point: %s", remove_shadow_start_point_ ? "true" : "false");
++
++    if (min_angle_ < 0)
++    {
++      ROS_ERROR("min_angle must be 0 <= min_angle. Forcing min_angle = 0.\n");
++      min_angle_ = 0.0;
++    }
++    if (90 < min_angle_)
++    {
++      ROS_ERROR("min_angle must be min_angle <= 90. Forcing min_angle = 90.\n");
++      min_angle_ = 90.0;
++    }
++    if (max_angle_ < 90)
++    {
++      ROS_ERROR("max_angle must be 90 <= max_angle. Forcing max_angle = 90.\n");
++      max_angle_ = 90.0;
++    }
++    if (180 < max_angle_)
++    {
++      ROS_ERROR("max_angle must be max_angle <= 180. Forcing max_angle = 180.\n");
++      max_angle_ = 180.0;
++    }
++
++    shadow_detector_.configure(
++        angles::from_degrees(min_angle_),
++        angles::from_degrees(max_angle_));
++
++    angle_increment_ = 0;
++    param_config.min_angle = min_angle_;
++    param_config.max_angle = max_angle_;
++    param_config.window = window_;
++    param_config.neighbors = neighbors_;
++    param_config.remove_shadow_start_point = remove_shadow_start_point_;
++    dyn_server_->updateConfig(param_config);
++
++    return true;
++}
++
++void ScanShadowsFilter::reconfigureCB(ScanShadowsFilterConfig& config, uint32_t level)
++{
++    boost::recursive_mutex::scoped_lock lock(own_mutex_);
++
++    min_angle_ = config.min_angle;
++    max_angle_ = config.max_angle;
++    shadow_detector_.configure(
++        angles::from_degrees(min_angle_),
++        angles::from_degrees(max_angle_));
++    neighbors_ = config.neighbors;
++    window_ = config.window;
++    angle_increment_ = 0;
++    remove_shadow_start_point_ = config.remove_shadow_start_point;
++}
++
++bool ScanShadowsFilter::update(const sensor_msgs::LaserScan& scan_in, sensor_msgs::LaserScan& scan_out)
++{
++    boost::recursive_mutex::scoped_lock lock(own_mutex_);
++
++    // copy across all data first
++    scan_out = scan_in;
++
++    int size = scan_in.ranges.size();
++    int max_y;
++    int max_neighbors;
++    prepareForInput(scan_in.angle_increment);
++    // For each point in the current line scan
++    for (int i = 0; i < size; i++)
++    {
++      max_y = std::min<int>(size - i, window_ + 1);
++      for (int y = std::max<int>(-i, -window_); y < max_y; y++)
++      {
++        if (y == 0)
++        {
++          continue;
++        }
++
++        if (shadow_detector_.isShadow(
++                scan_in.ranges[i], scan_in.ranges[i + y], sin_map_[y + window_], cos_map_[y + window_]))
++        {
++          max_neighbors = std::min<int>(i + neighbors_, size - 1);
++          for (int index = std::max<int>(i - neighbors_, 0); index <= max_neighbors; index++)
++          {
++            if (scan_in.ranges[i] < scan_in.ranges[index])
++            {  // delete neighbor if they are farther away (note not self)
++              scan_out.ranges[index] = std::numeric_limits<float>::quiet_NaN(); 
++            }
++          }
++          if (remove_shadow_start_point_)
++          {
++              scan_out.ranges[i] = std::numeric_limits<float>::quiet_NaN(); 
++          }
++          break;
++        }
++      }
++    }
++
++    return true;
++}
++
++void ScanShadowsFilter::prepareForInput(const float angle_increment) {
++  if (angle_increment_ != angle_increment) {
++    ROS_DEBUG ("[ScanShadowsFilter] No precomputed map given. Computing one.");
++    angle_increment_ = angle_increment;
++    sin_map_.clear();
++    cos_map_.clear();
++
++    float included_angle = -window_ * angle_increment;
++    for (int i = -window_; i <= window_; ++i) {
++      sin_map_.push_back(fabs(sinf(included_angle)));
++      cos_map_.push_back(cosf(included_angle));
++      included_angle += angle_increment;
++    }
++  }
++}
++}
+diff --git a/src/scan_to_cloud_filter_chain.cpp b/src/scan_to_cloud_filter_chain.cpp
+index 6f5426a..6602886 100644
+--- a/src/scan_to_cloud_filter_chain.cpp
++++ b/src/scan_to_cloud_filter_chain.cpp
+@@ -53,7 +53,7 @@
+ 
+ #if BUILDING_NODELET
+ #include <nodelet/nodelet.h>
+-#include <pluginlib/class_list_macros.h>
++#include <pluginlib/class_list_macros.hpp>
+ 
+ #define LASER_INFO NODELET_INFO
+ #define LASER_WARN NODELET_WARN
+@@ -109,8 +109,8 @@ public:
+   bool  incident_angle_correction_;
+ 
+   ////////////////////////////////////////////////////////////////////////////////
+-  ScanToCloudFilterChain (ros::NodeHandle& pnh, const std::string& name) :
+-      laser_max_range_ (DBL_MAX), private_nh(pnh), name_(name), filter_(tf_, "", 50),
++  ScanToCloudFilterChain (ros::NodeHandle& nh_, ros::NodeHandle& pnh, const std::string& name) :
++      laser_max_range_ (DBL_MAX), nh(nh_), private_nh(pnh), name_(name), filter_(tf_, "", 50),
+       cloud_filter_chain_("sensor_msgs::PointCloud2"), scan_filter_chain_("sensor_msgs::LaserScan")
+   {
+     private_nh.param("high_fidelity", high_fidelity_, false);
+@@ -156,7 +156,7 @@ public:
+       channel_options_ |= laser_geometry::channel_option::Viewpoint;
+ 
+     filter_.setTargetFrame(target_frame_);
+-    filter_.registerCallback(boost::bind(&ScanToCloudFilterChain::scanCallback, this, _1));
++    filter_.registerCallback(boost::bind(&ScanToCloudFilterChain::scanCallback, this, boost::placeholders::_1));
+     filter_.setTolerance(ros::Duration(tf_tolerance_));
+ 
+     if (using_scan_topic_deprecated_)
+@@ -187,7 +187,7 @@ public:
+     else
+       scan_filter_chain_.configure("scan_filter_chain", private_nh);
+ 
+-    deprecation_timer_ = nh.createTimer(ros::Duration(5.0), boost::bind(&ScanToCloudFilterChain::deprecation_warn, this, _1));
++    deprecation_timer_ = nh.createTimer(ros::Duration(5.0), [this](auto& event){ this->deprecation_warn(event); });
+ 
+     LASER_INFO("Scan to cloud filter initialized.");
+   }
+@@ -287,7 +287,7 @@ class ScanToCloudFilterChainNodelet : public nodelet::Nodelet
+   std::unique_ptr<ScanToCloudFilterChain> chain_;
+ 
+   void onInit() override {
+-    chain_ = std::unique_ptr<ScanToCloudFilterChain>(new ScanToCloudFilterChain(getPrivateNodeHandle(), getName()));
++    chain_ = std::unique_ptr<ScanToCloudFilterChain>(new ScanToCloudFilterChain(getNodeHandle(), getPrivateNodeHandle(), getName()));
+   }
+ };
+ 
+@@ -297,8 +297,8 @@ int
+ main (int argc, char** argv)
+ {
+   ros::init (argc, argv, "scan_to_cloud_filter_chain");
+-  ros::NodeHandle pnh("~");
+-  ScanToCloudFilterChain f(pnh, "");
++  ros::NodeHandle nh, pnh("~");
++  ScanToCloudFilterChain f(nh, pnh, "");
+ 
+   ros::spin();
+ 
+diff --git a/src/scan_to_scan_filter_chain.cpp b/src/scan_to_scan_filter_chain.cpp
+index 2d7cdbc..b476394 100644
+--- a/src/scan_to_scan_filter_chain.cpp
++++ b/src/scan_to_scan_filter_chain.cpp
+@@ -35,6 +35,11 @@
+ #include "tf/transform_listener.h"
+ #include <filters/filter_chain.hpp>
+ 
++#if BUILDING_NODELET
++#include <nodelet/nodelet.h>
++#include <pluginlib/class_list_macros.hpp>
++#endif
++
+ class ScanToScanFilterChain
+ {
+ protected:
+@@ -61,11 +66,12 @@ protected:
+ 
+ public:
+   // Constructor
+-  ScanToScanFilterChain() :
+-    private_nh_("~"),
++  ScanToScanFilterChain(const ros::NodeHandle& nh = {}, const ros::NodeHandle& pnh = {"~"}) :
++    nh_(nh),
++    private_nh_(pnh),
++    tf_(nullptr),
+     scan_sub_(nh_, "scan", 50),
+-    tf_(NULL),
+-    tf_filter_(NULL),
++    tf_filter_(nullptr),
+     filter_chain_("sensor_msgs::LaserScan")
+   {
+     // Configure filter chain
+@@ -91,19 +97,19 @@ public:
+       tf_filter_->setTolerance(ros::Duration(tf_filter_tolerance_));
+ 
+       // Setup tf::MessageFilter generates callback
+-      tf_filter_->registerCallback(boost::bind(&ScanToScanFilterChain::callback, this, _1));
++      tf_filter_->registerCallback(boost::bind(&ScanToScanFilterChain::callback, this, boost::placeholders::_1));
+     }
+     else 
+     {
+       // Pass through if no tf_message_filter_target_frame
+-      scan_sub_.registerCallback(boost::bind(&ScanToScanFilterChain::callback, this, _1));
++      scan_sub_.registerCallback(boost::bind(&ScanToScanFilterChain::callback, this, boost::placeholders::_1));
+     }
+     
+     // Advertise output
+     output_pub_ = nh_.advertise<sensor_msgs::LaserScan>("scan_filtered", 1000);
+ 
+     // Set up deprecation printout
+-    deprecation_timer_ = nh_.createTimer(ros::Duration(5.0), boost::bind(&ScanToScanFilterChain::deprecation_warn, this, _1));
++    deprecation_timer_ = nh_.createTimer(ros::Duration(5.0), boost::bind(&ScanToScanFilterChain::deprecation_warn, this, boost::placeholders::_1));
+   }
+ 
+   // Destructor
+@@ -136,6 +142,21 @@ public:
+   }
+ };
+ 
++#if BUILDING_NODELET
++
++class ScanToScanFilterChainNodelet : public nodelet::Nodelet
++{
++  std::unique_ptr<ScanToScanFilterChain> chain_;
++
++  void onInit() override {
++    chain_ = std::unique_ptr<ScanToScanFilterChain>(new ScanToScanFilterChain(getNodeHandle(), getPrivateNodeHandle()));
++  }
++};
++
++PLUGINLIB_EXPORT_CLASS(ScanToScanFilterChainNodelet, nodelet::Nodelet)
++
++#else
++
+ int main(int argc, char **argv)
+ {
+   ros::init(argc, argv, "scan_to_scan_filter_chain");
+@@ -145,3 +166,5 @@ int main(int argc, char **argv)
+   
+   return 0;
+ }
++
++#endif
+diff --git a/src/sector_filter.cpp b/src/sector_filter.cpp
+index a47df68..265bcac 100644
+--- a/src/sector_filter.cpp
++++ b/src/sector_filter.cpp
+@@ -46,7 +46,7 @@ bool LaserScanSectorFilter::configure()
+   ros::NodeHandle private_nh("~" + getName());
+   dyn_server_.reset(new dynamic_reconfigure::Server<SectorFilterConfig>(own_mutex_, private_nh));
+   dynamic_reconfigure::Server<SectorFilterConfig>::CallbackType f;
+-  f = boost::bind(&LaserScanSectorFilter::reconfigureCB, this, _1, _2);
++  f = [this](auto& config, auto level){ reconfigureCB(config, level); };
+   dyn_server_->setCallback(f);
+ 
+   getParam("angle_min", config_.angle_min);
+diff --git a/src/speckle_filter.cpp b/src/speckle_filter.cpp
+index f524d63..a74f569 100644
+--- a/src/speckle_filter.cpp
++++ b/src/speckle_filter.cpp
+@@ -60,7 +60,7 @@ bool LaserScanSpeckleFilter::configure()
+   ros::NodeHandle private_nh("~" + getName());
+   dyn_server_.reset(new dynamic_reconfigure::Server<laser_filters::SpeckleFilterConfig>(own_mutex_, private_nh));
+   dynamic_reconfigure::Server<laser_filters::SpeckleFilterConfig>::CallbackType f;
+-  f = boost::bind(&laser_filters::LaserScanSpeckleFilter::reconfigureCB, this, _1, _2);
++  f = [this](auto& config, auto level){ reconfigureCB(config, level); };
+   dyn_server_->setCallback(f);
+ 
+   getParam("filter_type", config_.filter_type);
+@@ -73,8 +73,11 @@ bool LaserScanSpeckleFilter::configure()
+ 
+ bool LaserScanSpeckleFilter::update(const sensor_msgs::LaserScan& input_scan, sensor_msgs::LaserScan& output_scan)
+ {
++  boost::recursive_mutex::scoped_lock lock(own_mutex_);
++
+   output_scan = input_scan;
+-  std::vector<bool> valid_ranges(output_scan.ranges.size(), false);
++
++  std::vector<bool> &valid_ranges = valid_ranges_work_;
+ 
+   /*Check if range size is big enough to use the filter window */
+   if (output_scan.ranges.size() <= config_.filter_window + 1)
+@@ -83,29 +86,37 @@ bool LaserScanSpeckleFilter::update(const sensor_msgs::LaserScan& input_scan, se
+     return false;
+   }
+ 
+-  for (size_t idx = 0; idx < output_scan.ranges.size() - config_.filter_window + 1; ++idx)
+-  {
+-    bool window_valid = validator_->checkWindowValid(
+-          output_scan, idx, config_.filter_window, config_.max_range_difference);
++  size_t i = 0;
++  size_t i_max = input_scan.ranges.size();
++  valid_ranges.clear();
++  while (i < i_max) {
++    bool out_of_range = output_scan.ranges[i] > config_.max_range;
++    valid_ranges.push_back(out_of_range);
++    ++i;
++  }
+ 
+-    // Actually set the valid ranges (do not set to false if it was already valid or out of range)
+-    for (size_t neighbor_idx_or_self_nr = 0; neighbor_idx_or_self_nr < config_.filter_window; ++neighbor_idx_or_self_nr)
+-    {
+-      size_t neighbor_idx_or_self = idx + neighbor_idx_or_self_nr;
+-      if (neighbor_idx_or_self < output_scan.ranges.size())  // Out of bound check
+-      {
+-        bool out_of_range = output_scan.ranges[neighbor_idx_or_self] > config_.max_range;
+-        valid_ranges[neighbor_idx_or_self] = valid_ranges[neighbor_idx_or_self] || window_valid || out_of_range;
+-      }
++  i = 0;
++  i_max = input_scan.ranges.size() - config_.filter_window + 1;
++  while (i < i_max) {
++    bool window_valid = validator_->checkWindowValid(
++      output_scan, i, config_.filter_window, config_.max_range_difference
++    );
++    if (window_valid) {
++      size_t j = i, j_max = i + config_.filter_window;
++      do {
++        valid_ranges[j++] = true;
++      } while (j < j_max);
+     }
++    ++i;
+   }
+ 
+-  for (size_t idx = 0; idx < valid_ranges.size(); ++idx)
+-  {
+-    if (!valid_ranges[idx])
+-    {
+-      output_scan.ranges[idx] = std::numeric_limits<float>::quiet_NaN();
++  i = 0;
++  i_max = valid_ranges.size();
++  while (i < i_max) {
++    if (!valid_ranges[i]) {
++      output_scan.ranges[i] = std::numeric_limits<float>::quiet_NaN();
+     }
++    ++i;
+   }
+ 
+   return true;
+diff --git a/test/test_scan_filter_chain.cpp b/test/test_scan_filter_chain.cpp
+index 0ea463f..0dc3a30 100644
+--- a/test/test_scan_filter_chain.cpp
++++ b/test/test_scan_filter_chain.cpp
+@@ -31,7 +31,7 @@
+ #include <filters/filter_chain.hpp>
+ #include <ros/ros.h>
+ #include "sensor_msgs/LaserScan.h"
+-#include <pluginlib/class_loader.h>
++#include <pluginlib/class_loader.hpp>
+ 
+ 
+ sensor_msgs::LaserScan gen_msg(){
+diff --git a/test/test_scan_shadows_filter.cpp b/test/test_scan_shadows_filter.cpp
+new file mode 100644
+index 0000000..3f03d69
+--- /dev/null
++++ b/test/test_scan_shadows_filter.cpp
+@@ -0,0 +1,419 @@
++#include <gtest/gtest.h>
++#include <ros/ros.h>
++#include <cmath>
++#include "laser_filters/scan_shadows_filter.h"
++#include "sensor_msgs/LaserScan.h"
++
++sensor_msgs::LaserScan create_message(
++    float ranges[], int num_beams
++) {
++    sensor_msgs::LaserScan msg;
++
++    std::vector<float> v_range(ranges, ranges + num_beams);
++
++    msg.header.stamp = ros::Time::now();
++    msg.header.frame_id = "laser";
++    // Use a small beam so that angle_increment remains small (realistic) also with few points
++    msg.angle_min = -M_PI / 12;
++    msg.angle_max = M_PI / 12;
++    msg.angle_increment = (msg.angle_max - msg.angle_min) / (num_beams - 1);
++    msg.time_increment = 0.1 / num_beams;
++    msg.scan_time = 0.1;
++    msg.range_min = 0.1;
++    msg.range_max = 10;
++    msg.ranges = v_range;
++
++    return msg;
++}
++
++/**
++ * Verifies that two vectors of range values are the same. Allows the case
++ * where corresponding values are both NaN.
++ */
++void expect_ranges_equal(const std::vector<float> &actual, const float expected[], int expected_len) {
++    EXPECT_EQ(expected_len, actual.size());
++    for (int i = 0; i < expected_len; i++) {
++        if (std::isnan(expected[i])) {
++            EXPECT_TRUE(std::isnan(actual[i])) << "Mismatch at index " << i << std::endl;
++        }
++        else {
++            EXPECT_NEAR(expected[i], actual[i], 1e-6) << "Mismatch at index " << i << std::endl;
++        }
++    }
++}
++
++void expect_ranges_equal(const std::vector<float> &actual, const std::vector<float> expected) {
++    expect_ranges_equal(actual, &expected[0], expected.size());
++}
++
++TEST(ScanShadowsFilter, NoShadows) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 15.0;
++    config.max_angle = 165.0;
++    config.neighbors = 1;
++    config.window = 1;
++    config.remove_shadow_start_point = true;
++
++    filter.reconfigureCB(config, 0);
++
++    float ranges[] = {9, 9, 9, 9, 9, 9, 9, 9, 9, 9};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    float expected[] = {9, 9, 9, 9, 9, 9, 9, 9, 9, 9};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, DistanceDeltaWithoutShadow) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 15.0;
++    config.max_angle = 165.0;
++    config.neighbors = 0;
++    config.window = 1;
++    config.remove_shadow_start_point = true;
++
++    filter.reconfigureCB(config, 0);
++
++    // This input data is very much simplified. The range-5 points represent a nearby object, and
++    // the range-9 points a wall.
++    float ranges[] = {5, 5, 5, 5, 5, 9, 9, 9, 9, 9};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // Below is what is expected given the filter's current logic. However, it shows that the
++    // filter is primitive and can filter out point that are not shadows.
++    float expected[] = {5, 5, 5, 5, NAN, NAN, 9, 9, 9, 9};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, DistanceDeltaWithoutShadow_Angles_8_172) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 8.0;
++    config.max_angle = 172.0;
++    config.neighbors = 0;
++    config.window = 1;
++    config.remove_shadow_start_point = true;
++
++    filter.reconfigureCB(config, 0);
++
++    float ranges[] = {5, 5, 5, 5, 5, 9, 9, 9, 9, 9};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // Increasing the angle range still results in the same filter behaviour.
++    float expected[] = {5, 5, 5, 5, NAN, NAN, 9, 9, 9, 9};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, DistanceDeltaWithoutShadow_Angles_5_175) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 5.0;
++    config.max_angle = 175.0;
++    config.neighbors = 0;
++    config.window = 1;
++    config.remove_shadow_start_point = true;
++
++    filter.reconfigureCB(config, 0);
++
++    float ranges[] = {5, 5, 5, 5, 5, 9, 9, 9, 9, 9};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // Increasing the angle range more, filters out fewer points
++    float expected[] = {5, 5, 5, 5, 5, NAN, 9, 9, 9, 9};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, DistanceDeltaWithoutShadowFlipped_Angles_5_175) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 5.0;
++    config.max_angle = 175.0;
++    config.neighbors = 0;
++    config.window = 1;
++    config.remove_shadow_start_point = true;
++
++    filter.reconfigureCB(config, 0);
++
++    float ranges[] = {9, 9, 9, 9, 9, 5, 5, 5, 5, 5};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // Reversing the input results in reversed output
++    float expected[] = {9, 9, 9, 9, NAN, 5, 5, 5, 5, 5};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, DistanceDeltaWithoutShadow_Angles_3_177) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 3.0;
++    config.max_angle = 177.0;
++    config.neighbors = 0;
++    config.window = 1;
++    config.remove_shadow_start_point = true;
++
++    filter.reconfigureCB(config, 0);
++
++    float ranges[] = {5, 5, 5, 5, 5, 9, 9, 9, 9, 9};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // Increasing the range even more, no more points are filtered out
++    float expected[] = {5, 5, 5, 5, 5, 9, 9, 9, 9, 9};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, SingleBackwardShadow_NoNeighbours) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 15.0;
++    config.max_angle = 165.0;
++    config.neighbors = 0;
++    config.window = 1;
++    config.remove_shadow_start_point = true;
++
++    filter.reconfigureCB(config, 0);
++
++    // This input data is very much simplified. The range-5 points represent a nearby object, and
++    // the range-9 points a wall. The range-7 point is a shadow.
++    float ranges[] = {5, 5, 5, 5, 5, 9, 7, 9, 9, 9};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // The shadow is filtered out, as well as some other points
++    float expected[] = {5, 5, 5, 5, NAN, NAN, NAN, NAN, 9, 9};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, SingleBackwardShadow_OneNeighbour) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 15.0;
++    config.max_angle = 165.0;
++    config.neighbors = 1;
++    config.window = 1;
++    config.remove_shadow_start_point = false;
++
++    filter.reconfigureCB(config, 0);
++
++    float ranges[] = {5, 5, 5, 5, 5, 9, 7, 9, 9, 9};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // Below is what is expected given the filter's current logic. Note, this configuration does
++    // not filter out the simulated shadow but some other points.
++    float expected[] = {5, 5, 5, 5, 5, NAN, 7, NAN, 9, 9};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, SingleForwardShadow_NoNeighbours) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 15.0;
++    config.max_angle = 165.0;
++    config.neighbors = 0;
++    config.window = 1;
++    config.remove_shadow_start_point = true;
++
++    filter.reconfigureCB(config, 0);
++
++    // This input data is very much simplified. The range-5 points represent a nearby object, and
++    // the range-9 points a wall. The range-3 point is a shadow.
++    float ranges[] = {5, 5, 5, 5, 5, 9, 3, 9, 9, 9};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // The shadow is filtered out, as well as some other points
++    float expected[] = {5, 5, 5, 5, NAN, NAN, NAN, NAN, 9, 9};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, SingleForwardShadow_OneNeighbour) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 15.0;
++    config.max_angle = 165.0;
++    config.neighbors = 1;
++    config.window = 1;
++    config.remove_shadow_start_point = false;
++
++    filter.reconfigureCB(config, 0);
++
++    float ranges[] = {5, 5, 5, 5, 5, 9, 3, 9, 9, 9};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // Below is what is expected given the filter's current logic. Note, this configuration does
++    // not filter out the simulated shadow but some other points.
++    float expected[] = {5, 5, 5, 5, 5, NAN, 3, NAN, 9, 9};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++}
++
++TEST(ScanShadowsFilter, SingleForwardShadow_AngleIncrementChanged) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 15.0;
++    config.max_angle = 165.0;
++    config.neighbors = 1;
++    config.window = 1;
++    config.remove_shadow_start_point = false;
++
++    filter.reconfigureCB(config, 0);
++
++    float ranges[] = {5, 5, 5, 5, 5, 4, 4, 4, 4, 4};
++    sensor_msgs::LaserScan input_scan = create_message(
++        ranges, sizeof(ranges) / sizeof(float)
++    );
++    sensor_msgs::LaserScan output_scan;
++
++    filter.update(input_scan, output_scan);
++
++    // Below is what is expected given the filter's current logic. Note, this configuration does
++    // not filter out the simulated shadow but some other points.
++    float expected[] = {5, 5, 5, 5, 5, 4, 4, 4, 4, 4};
++
++    expect_ranges_equal(output_scan.ranges, expected, sizeof(expected) / sizeof(float));
++
++    // Smaller angle_increment, results in steeper angles and shadow detection
++    input_scan.angle_increment /= 2;    
++    filter.update(input_scan, output_scan);
++
++    float new_expected[] = {5, 5, 5, 5, NAN, 4, 4, 4, 4, 4};
++
++    expect_ranges_equal(output_scan.ranges, new_expected, sizeof(new_expected) / sizeof(float));
++}
++
++#ifdef ENABLE_PERFORMANCE
++TEST(ScanShadowsFilter, Performance) {
++    laser_filters::ScanShadowsFilter filter;
++    laser_filters::ScanShadowsFilterConfig config;
++
++    config.min_angle = 15.0;
++    config.max_angle = 165.0;
++    config.neighbors = 2;
++    config.window = 2;
++    config.remove_shadow_start_point = true;
++
++    filter.reconfigureCB(config, 0);
++
++    float ranges[] = {};
++    sensor_msgs::LaserScan input_scan[2];
++    input_scan[0] = create_message(ranges, 0);
++    int num_samples = 1024;
++    int next_index = 0;
++    int pending = 0;
++    float range_val = 5;
++    while (input_scan[0].ranges.size() < num_samples) {
++        if (pending == 0) {
++            range_val = 5 + next_index;
++            pending = next_index + 1;
++
++            if (next_index == 10) {
++                range_val = range_val + 20;
++                next_index = 0;
++            } else {
++                ++next_index;
++            }
++        }
++
++        input_scan[0].ranges.push_back(range_val);
++        --pending;
++    }
++
++    // Create second input set. A mirror of the first
++    input_scan[1] = input_scan[0];
++    std::reverse(input_scan[1].ranges.begin(), input_scan[1].ranges.end());
++
++    sensor_msgs::LaserScan output_scan;
++    sensor_msgs::LaserScan expected_scan[2];
++    float expected_data[2][num_samples];
++
++    // Create expected output by running filter once.
++
++    // The main purpose is to check that when executing repeatedly, the expected output
++    // alternates.
++    for (int j = 0; j < 2; j++) {
++        filter.update(input_scan[j], expected_scan[j]);
++    }
++
++    for (int i = 0; i < 10000; i++) {
++        int j = i % 2;
++        filter.update(input_scan[j], output_scan);
++
++        expect_ranges_equal(output_scan.ranges, expected_scan[j].ranges);
++    }
++}
++#endif
++
++int main(int argc, char **argv) {
++    testing::InitGoogleTest(&argc, argv);
++    ros::init(argc, argv, "test_scan_shadows_filter");
++    ros::Time::init();
++    return RUN_ALL_TESTS();
++}
+\ No newline at end of file
+diff --git a/test/test_shadow_detector.cpp b/test/test_shadow_detector.cpp
+index e8ed6a0..457a6e2 100644
+--- a/test/test_shadow_detector.cpp
++++ b/test/test_shadow_detector.cpp
+@@ -38,6 +38,7 @@
+ 
+ #include <gtest/gtest.h>
+ #include <angles/angles.h>
++#include <math.h>
+ 
+ #include "laser_filters/scan_shadow_detector.h"
+ 
+@@ -57,6 +58,8 @@ bool isShadowPureImpl(const float r1, const float r2, const float included_angle
+ 
+ TEST(ScanShadowDetector, ShadowDetectionGeometry)
+ {
++  const float angle_increment = 0.02;
++  const int window = 5;
+   for (float min_angle = 90.0; min_angle >= 0.0; min_angle -= 5.0)
+   {
+     for (float max_angle = 90.0; max_angle <= 180; max_angle += 5.0)
+@@ -68,12 +71,22 @@ TEST(ScanShadowDetector, ShadowDetectionGeometry)
+       {
+         for (float r2 = 0.1; r2 < 1.0; r2 += 0.1)
+         {
+-          for (float inc = 0.01; inc < 0.1; inc += 0.02)
++          for (int inc = -window; inc <= window; ++inc)
+           {
++            if (inc == 0)
++              continue;
++
++            float angle = inc * angle_increment;
++              
++            // Compare with original ScanShadowsFilter implementation
++            EXPECT_EQ(
++                detector.isShadow(r1, r2, angle),
++                isShadowPureImpl(r1, r2, angle, min_angle, max_angle));
++              
+             // Compare with original ScanShadowsFilter implementation
+             EXPECT_EQ(
+-                detector.isShadow(r1, r2, inc),
+-                isShadowPureImpl(r1, r2, inc, min_angle, max_angle));
++                detector.isShadow(r1, r2, sinf(angle), cosf(angle)),
++                isShadowPureImpl(r1, r2, angle, min_angle, max_angle));
+           }
+         }
+       }
