@@ -1,0 +1,26 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fcc1ada..bd2b7b4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -10,7 +10,11 @@ set(THIS_PACKAGE_ROS_DEPS sensor_msgs roscpp tf filters message_filters
+ 
+ find_package(catkin REQUIRED COMPONENTS ${THIS_PACKAGE_ROS_DEPS})
+ find_package(Boost REQUIRED COMPONENTS system)
+-include_directories(include ${catkin_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
++find_package(Eigen3 REQUIRED)
++if (NOT DEFINED Eigen3_INCLUDE_DIRS)
++  get_target_property(Eigen3_INCLUDE_DIRS Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
++endif()
++include_directories(include ${catkin_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS} ${Eigen3_INCLUDE_DIRS})
+ 
+ ##############################################################################
+ # Define package
+@@ -101,7 +105,7 @@ endif()
+ # Install
+ ##############################################################################
+ 
+-install(TARGETS pointcloud_filters laser_scan_filters 
++install(TARGETS pointcloud_filters laser_scan_filters
+   scan_to_cloud_filter_chain
+   scan_to_scan_filter_chain
+   ${PROJECT_NAME}_nodelets

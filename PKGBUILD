@@ -4,7 +4,7 @@ url='https://wiki.ros.org/laser_filters'
 pkgname='ros-noetic-laser-filters'
 pkgver='1.9.0'
 arch=('i686' 'x86_64' 'aarch64' 'armv7h' 'armv6h')
-pkgrel=2
+pkgrel=3
 license=('BSD')
 
 ros_makedepends=(
@@ -45,12 +45,23 @@ depends=(
 )
 
 _dir="laser_filters-${pkgver}"
-source=("${pkgname}-${pkgver}.tar.gz"::"https://github.com/ros-perception/laser_filters/archive/${pkgver}.tar.gz")
-sha256sums=('e9e58f4e6e22717973e4a187e1472c5b6d11247b96e03f8080f339e0077e37b8')
+source=(
+    "${pkgname}-${pkgver}.tar.gz"::"https://github.com/ros-perception/laser_filters/archive/${pkgver}.tar.gz"
+    "eigen.patch"
+    "sync.patch"
+)
+sha256sums=(
+    'e9e58f4e6e22717973e4a187e1472c5b6d11247b96e03f8080f339e0077e37b8'
+    '30b3e241d81cf4435b6428a0dc6e81e30fd5a69588a71eb423d69f0b0e843de7'
+    '9e622f2d04204cec6fa1b8051ea83d3c41b47cb3a8e3a038504022e81c704b05'
+)
 
 prepare() {
-    sed -i '4s/11/17/' ${_dir}/CMakeLists.txt
+    cd ${srcdir}/${_dir}
+    patch -p1 -i ${srcdir}/sync.patch
+    patch -p1 -i ${srcdir}/eigen.patch
 }
+
 build() {
     # Use ROS environment variables.
     source /usr/share/ros-build-tools/clear-ros-env.sh
